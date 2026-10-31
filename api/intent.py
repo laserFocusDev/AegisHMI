@@ -18,6 +18,15 @@ asset.
 """
 
 import re
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class OperatorIntent:
+    """Structured interpretation of an operator's monitoring request."""
+
+    intent: str
+    focus: tuple[str, ...]
+    urgency: str
 
 # (asset_id, keywords). Every keyword is matched case-insensitively as a
 # plain substring of the prompt. Keywords are drawn from what an operator
@@ -257,3 +266,150 @@ def control_request(prompt: str) -> str | None:
                 continue  # asking what the machine does, not telling it to
             return matched.strip()
     return None
+
+# --------------------------------------------------------------------------
+# Structured monitoring-intent classification
+# --------------------------------------------------------------------------
+
+_INTENT_PATTERNS = {
+    "alarms": (
+        "alarm",
+        "alarms",
+        "fault",
+        "faults",
+        "trip",
+        "trips",
+        "warning",
+        "warnings",
+    ),
+    "trend": (
+        "trend",
+        "trending",
+        "history",
+        "historical",
+        "over time",
+        "graph",
+        "plot",
+        "chart",
+    ),
+    "comms": (
+        "communication",
+        "communications",
+        "comms",
+        "connection",
+        "connectivity",
+        "network health",
+        "plc health",
+    ),
+    "diagnose": (
+        "what's wrong",
+        "what is wrong",
+        "something is wrong",
+        "why is",
+        "why did",
+        "diagnose",
+        "diagnosis",
+        "problem",
+        "issue",
+        "abnormal",
+        "abnormality",
+    ),
+    "overview": (
+        "overview",
+        "summary",
+        "overall",
+        "at a glance",
+        "status",
+    ),
+    "monitor": (
+        "monitor",
+        "watch",
+        "show",
+        "display",
+        "view",
+        "see",
+        "check",
+    ),
+}
+
+_FOCUS_PATTERNS = {
+    "alarms": _INTENT_PATTERNS["alarms"],
+    "temperature": (
+        "temperature",
+        "temp",
+        "thermal",
+        "heat",
+    ),
+    "pressure": (
+        "pressure",
+        "pressures",
+    ),
+    "communications": _INTENT_PATTERNS["comms"],
+    "trend": _INTENT_PATTERNS["trend"],
+}
+
+def _extract_focus(text: str) -> tuple[str, ...]:
+    """Return the monitoring topics explicitly mentioned by the operator."""
+
+    focus = []
+
+    for name, keywords in _FOCUS_PATTERNS.items():
+        if any(keyword in text for keyword in keywords):
+            focus.append(name)
+
+    return tuple(focus)
+
+def classify_intent(prompt: str) -> OperatorIntent:
+    """
+    Classify a monitoring request without using an LLM.
+
+    The classifier is deliberately conservative:
+    explicit signals are preferred, and ambiguous requests fall back
+    to the generic monitor intent.
+    """
+
+    text = " ".join((prompt or "").lower().split())
+
+    focus = _extract_focus(text)
+
+    # Safety-related requests get diagnostic treatment first.
+    if any(keyword in text for keyword in _INTENT_PATTERNS["diagnose"]):
+        return OperatorIntent(
+            intent="diagnose",
+            focus=focus,
+            urgency="high",
+        )
+
+    if "alarms" in focus:
+        return OperatorIntent(
+            intent="alarms",
+            focus=focus,
+            urgency="high",
+        )
+
+    if "trend" in focus:
+        return OperatorIntent(
+            intent="trend",
+            focus=focus,
+            urgency="normal",
+        )
+
+    if "communications" in focus:
+        return OperatorIntent(
+            intent="comms",
+            focus=focus,
+            urgency="normal",
+        )
+
+    if any(keyword in text for keyword in _INTENT_PATTERNS["overview"]):
+        return OperatorIntent(
+            intent="overview",
+            focus=focus,
+            urgency="normal",
+        )
+
+    return OperatorIntent(
+        intent="monitor",
+        focus=focus,
+        urgency="normal",
+    )

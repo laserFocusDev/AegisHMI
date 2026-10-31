@@ -205,3 +205,48 @@ def test_monitoring_requests_are_not_refused(prompt):
     assert intent.control_request(prompt) is None, (
         f"{prompt!r} is a monitoring request and must NOT be refused"
     )
+
+from intent import classify_intent
+
+
+def test_classify_alarm_request():
+    result = classify_intent("Show me the active alarms on the chiller")
+
+    assert result.intent == "alarms"
+    assert "alarms" in result.focus
+    assert result.urgency == "high"
+
+
+def test_classify_diagnostic_request():
+    result = classify_intent("Something is wrong with the chiller")
+
+    assert result.intent == "diagnose"
+    assert result.urgency == "high"
+
+
+def test_classify_trend_request():
+    result = classify_intent("Show me the temperature trend")
+
+    assert result.intent == "trend"
+    assert "temperature" in result.focus
+    assert "trend" in result.focus
+
+
+def test_classify_comms_request():
+    result = classify_intent("Show me the communication health")
+
+    assert result.intent == "comms"
+    assert "communications" in result.focus
+
+
+def test_classify_overview_request():
+    result = classify_intent("Give me an overview of the machine")
+
+    assert result.intent == "overview"
+
+
+def test_classify_generic_monitor_request():
+    result = classify_intent("Show me the machine")
+
+    assert result.intent == "monitor"
+    assert result.urgency == "normal"
