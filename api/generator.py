@@ -38,8 +38,6 @@ import context_store
 import intent
 import validator
 
-from intent import classify_intent
-
 MODEL_NAME = "gpt-4o-mini"
 
 # Groq and xAI both serve an OpenAI-compatible API, so the same client and the
@@ -194,6 +192,44 @@ def _strip_nulls(spec: dict) -> dict:
         for comp in spec.get("components", [])
     ]
     return cleaned
+
+
+def _semantic_coverage_errors(spec: dict, plan: intent.ScreenPlan) -> list[str]:
+    if plan.generic_monitor:
+        return []
+
+    by_type: dict[str, list[dict]] = {}
+    for component in spec.get("components", []):
+        by_type.setdefault(component.get("type"), []).append(component)
+
+    errors = []
+    for component_type in plan.required_component_types:
+        components = by_type.get(component_type, [])
+        if not components:
+            errors.append(
+                f"semantic: required component type {component_type!r} is missing"
+            )
+            continue
+
+        planned = set(plan.bindings_for(component_type))
+        bound: set[str] = set()
+        for component in components:
+            if component_type == "alarm_banner":
+                bound.update(component.get("bind_alarms", []))
+            elif component_type == "comms_health":
+                value = component.get("bind_device")
+                if value:
+                    bound.add(value)
+            else:
+                value = component.get("bind_tag")
+                if value:
+                    bound.add(value)
+        missing = sorted(planned - bound)
+        if missing:
+            errors.append(
+                f"semantic: {component_type!r} is missing planned bindings {missing}"
+            )
+    return errors
 
 
 def _active_provider() -> str:
@@ -448,7 +484,9 @@ def generate_and_validate(prompt: str, asset_id: str, panel_class: str, llm_fn=_
 
     operator_intent = intent.classify_intent(prompt)
 
-    ctx = _context_for_prompt(asset_id)
+    context_snapshot = context_store.get_context(asset_id)
+    ctx = {k: v for k, v in context_snapshot.items() if k != "io"}
+    plan = intent.build_screen_plan(operator_intent, context_snapshot)
     system_prompt = _build_system_prompt()
     # The operator's words go in verbatim. What changed on the machine is
     # added as separate context, never spliced into their request.
@@ -458,6 +496,14 @@ def generate_and_validate(prompt: str, asset_id: str, panel_class: str, llm_fn=_
         f"- intent: {operator_intent.intent}\n"
         f"- focus: {', '.join(operator_intent.focus) or 'none'}\n"
         f"- urgency: {operator_intent.urgency}\n"
+        f"Authoritative screen plan:\n"
+        f"- generic monitor fallback: {plan.generic_monitor}\n"
+        f"- required component types: "
+        f"{', '.join(plan.required_component_types) or 'none'}\n"
+        f"- required bindings: "
+        f"{json.dumps(dict(plan.required_bindings))}\n"
+        f"Every required component type and binding in this plan must be present. "
+        f"Do not select bindings outside the machine context.\n"
         f"Target panel class: {panel_class}\n"
         f"Machine context:\n{json.dumps(ctx, indent=2)}"
         f"{_whats_new_note(asset_id, since_context_version, previous_spec)}"
@@ -471,10 +517,14 @@ def generate_and_validate(prompt: str, asset_id: str, panel_class: str, llm_fn=_
             return None, {"message": f"LLM call failed: {e}", "stage": "llm", "field": None}
 
         cleaned = _strip_nulls(raw)
-        result = validator.validate_spec(cleaned)
+        result = validator.validate_spec(cleaned, context=context_snapshot)
 
         if result.valid:
-            return cleaned, None
+            semantic_errors = _semantic_coverage_errors(cleaned, plan)
+            if not semantic_errors:
+                return cleaned, None
+        else:
+            semantic_errors = []
 
         if attempt == 0:
             # Retry once, appending the validator's own error text so the
@@ -482,15 +532,16 @@ def generate_and_validate(prompt: str, asset_id: str, panel_class: str, llm_fn=_
             base_user_prompt = (
                 base_user_prompt
                 + "\n\nYour previous attempt was rejected for this reason:\n"
-                + "\n".join(result.errors)
+                + "\n".join(result.errors + semantic_errors)
                 + "\nFix this specific problem and try again."
             )
             continue
 
         # Second attempt also failed -- give up honestly.
+        errors = result.errors + semantic_errors
         return None, {
-            "message": "; ".join(result.errors) if result.errors else "Generated spec failed validation.",
-            "stage": result.failed_layer,
+            "message": "; ".join(errors) if errors else "Generated spec failed validation.",
+            "stage": "semantic" if semantic_errors and result.valid else result.failed_layer,
             "field": None,
         }
 

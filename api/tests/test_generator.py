@@ -26,7 +26,7 @@ def test_generator_includes_structured_operator_intent():
 
     spec, error = generate_and_validate(
         "Show me the temperature trend",
-        "plant.utilities.chiller1",
+        "line1.conveyorA",
         "medium",
         llm_fn=fake_llm,
     )
@@ -40,3 +40,49 @@ def test_generator_includes_structured_operator_intent():
     assert "- intent: trend" in prompt
     assert "- focus: temperature, trend" in prompt
     assert "- urgency: normal" in prompt
+    assert "Authoritative screen plan:" in prompt
+    assert '"Temperature_PV"' in prompt
+
+
+def test_schema_valid_but_irrelevant_output_is_retried_and_rejected():
+    calls = []
+
+    def fake_llm(system_prompt, user_prompt):
+        calls.append(user_prompt)
+        with open(TREND_SPEC, "r") as f:
+            spec = json.load(f)
+        spec["components"] = [
+            component
+            for component in spec["components"]
+            if component["type"] != "trend"
+        ]
+        return spec
+
+    spec, error = generate_and_validate(
+        "Show me the temperature trend",
+        "line1.conveyorA",
+        "medium",
+        llm_fn=fake_llm,
+    )
+
+    assert spec is None
+    assert error["stage"] == "semantic"
+    assert "required component type 'trend' is missing" in error["message"]
+    assert len(calls) == 2
+    assert "previous attempt was rejected" in calls[1]
+
+
+def test_plan_satisfying_output_passes_existing_validation():
+    def fake_llm(system_prompt, user_prompt):
+        with open(TREND_SPEC, "r") as f:
+            return json.load(f)
+
+    spec, error = generate_and_validate(
+        "Show me the temperature trend",
+        "line1.conveyorA",
+        "medium",
+        llm_fn=fake_llm,
+    )
+
+    assert error is None
+    assert spec is not None

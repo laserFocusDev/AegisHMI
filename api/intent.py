@@ -28,6 +28,23 @@ class OperatorIntent:
     focus: tuple[str, ...]
     urgency: str
 
+
+@dataclass(frozen=True)
+class ScreenPlan:
+    """Deterministic generation requirements derived from one context snapshot."""
+
+    intent: str
+    focus: tuple[str, ...]
+    required_component_types: tuple[str, ...]
+    required_bindings: tuple[tuple[str, tuple[str, ...]], ...]
+    generic_monitor: bool = False
+
+    def bindings_for(self, component_type: str) -> tuple[str, ...]:
+        for planned_type, values in self.required_bindings:
+            if planned_type == component_type:
+                return values
+        return ()
+
 # (asset_id, keywords). Every keyword is matched case-insensitively as a
 # plain substring of the prompt. Keywords are drawn from what an operator
 # would actually type for that machine -- its name, its major equipment, and
@@ -344,6 +361,9 @@ _FOCUS_PATTERNS = {
         "pressure",
         "pressures",
     ),
+    "vibration": (
+        "vibration",
+    ),
     "communications": _INTENT_PATTERNS["comms"],
     "trend": _INTENT_PATTERNS["trend"],
 }
@@ -412,4 +432,77 @@ def classify_intent(prompt: str) -> OperatorIntent:
         intent="monitor",
         focus=focus,
         urgency="normal",
+    )
+
+
+def _read_tags(context: dict) -> list[dict]:
+    return sorted(
+        (tag for tag in context.get("tags", []) if tag.get("access") == "read"),
+        key=lambda tag: tag.get("name", ""),
+    )
+
+
+def _tag_matches_focus(tag: dict, focus: str) -> bool:
+    searchable = " ".join(
+        str(tag.get(field, "")).lower().replace("_", " ")
+        for field in ("name", "unit")
+    )
+    aliases = {
+        "temperature": ("temperature", "temp", "thermal", "heat"),
+        "pressure": ("pressure", "pressures"),
+    }
+    return any(alias in searchable for alias in aliases.get(focus, (focus,)))
+
+
+def build_screen_plan(operator_intent: OperatorIntent, context: dict) -> ScreenPlan:
+    """Resolve classified intent to deterministic, context-owned requirements."""
+
+    alarms = tuple(sorted(alarm["id"] for alarm in context.get("alarms", [])))
+    devices = tuple(sorted(device["device"] for device in context.get("comms", [])))
+    read_tags = _read_tags(context)
+    tag_focus = tuple(
+        focus for focus in operator_intent.focus
+        if focus not in {"alarms", "communications", "trend"}
+    )
+    matching_tags = tuple(
+        tag["name"]
+        for tag in read_tags
+        if any(_tag_matches_focus(tag, focus) for focus in tag_focus)
+    )
+
+    if operator_intent.intent == "alarms" and alarms:
+        return ScreenPlan(
+            operator_intent.intent, operator_intent.focus,
+            ("alarm_banner",), (("alarm_banner", alarms),)
+        )
+    if operator_intent.intent == "trend" and matching_tags:
+        return ScreenPlan(
+            operator_intent.intent, operator_intent.focus,
+            ("trend",), (("trend", matching_tags),)
+        )
+    if operator_intent.intent == "comms" and devices:
+        return ScreenPlan(
+            operator_intent.intent, operator_intent.focus,
+            ("comms_health",), (("comms_health", devices),)
+        )
+    if operator_intent.intent == "diagnose":
+        diagnostic_tags = matching_tags or tuple(tag["name"] for tag in read_tags[:1])
+        bindings = []
+        if alarms:
+            bindings.append(("alarm_banner", alarms))
+        if diagnostic_tags:
+            bindings.append(("status_indicator", diagnostic_tags))
+        return ScreenPlan(
+            operator_intent.intent, operator_intent.focus,
+            tuple(component_type for component_type, _ in bindings),
+            tuple(bindings),
+            generic_monitor=not bindings,
+        )
+
+    return ScreenPlan(
+        operator_intent.intent,
+        operator_intent.focus,
+        (),
+        (),
+        generic_monitor=True,
     )

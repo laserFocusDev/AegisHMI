@@ -93,18 +93,19 @@ def _layer1_schema(spec: dict) -> list[str]:
     return errors
 
 
-def _layer2_whitelist(spec: dict) -> list[str]:
+def _layer2_whitelist(spec: dict, context: dict | None = None) -> list[str]:
     """Return a list of whitelist errors (empty list == layer passed)."""
     errors: list[str] = []
 
     asset_id = spec["asset_id"]
-    try:
-        context = context_store.get_context(asset_id)
-    except context_store.ContextNotFoundError:
-        return [
-            f"whitelist: asset_id {asset_id!r} has no machine context "
-            f"(known asset_ids: {context_store.list_asset_ids()})"
-        ]
+    if context is None:
+        try:
+            context = context_store.get_context(asset_id)
+        except context_store.ContextNotFoundError:
+            return [
+                f"whitelist: asset_id {asset_id!r} has no machine context "
+                f"(known asset_ids: {context_store.list_asset_ids()})"
+            ]
 
     known_tags = {t["name"] for t in context["tags"]}
     known_alarms = {a["id"] for a in context["alarms"]}
@@ -214,7 +215,7 @@ def _layer3_read_only(spec: dict) -> list[str]:
     return errors
 
 
-def validate_spec(spec: dict) -> ValidationResult:
+def validate_spec(spec: dict, context: dict | None = None) -> ValidationResult:
     """Validate a candidate screen spec through all three layers in order.
 
     Stops at the first layer that produces any error. Returns a
@@ -225,7 +226,7 @@ def validate_spec(spec: dict) -> ValidationResult:
     if schema_errors:
         return ValidationResult(valid=False, failed_layer="schema", errors=schema_errors)
 
-    whitelist_errors = _layer2_whitelist(spec)
+    whitelist_errors = _layer2_whitelist(spec, context=context)
     if whitelist_errors:
         return ValidationResult(
             valid=False, failed_layer="whitelist", errors=whitelist_errors

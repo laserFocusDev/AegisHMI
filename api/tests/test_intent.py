@@ -20,6 +20,7 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 import intent  # noqa: E402
+import context_store  # noqa: E402
 
 CONVEYOR = "line1.conveyorA"
 CHILLER = "plant.utilities.chiller1"
@@ -250,3 +251,96 @@ def test_classify_generic_monitor_request():
 
     assert result.intent == "monitor"
     assert result.urgency == "normal"
+
+
+def test_temperature_trend_plan_selects_all_matching_read_tags():
+    context = context_store.get_context(CHILLER)
+    plan = intent.build_screen_plan(
+        intent.classify_intent("Show me the temperature trend"),
+        context,
+    )
+
+    assert plan.required_component_types == ("trend",)
+    assert plan.bindings_for("trend") == (
+        "Chilled_Water_Return_Temp",
+        "Chilled_Water_Supply_Temp",
+    )
+
+
+def test_alarm_plan_uses_current_alarm_ids_only():
+    context = context_store.get_context(CHILLER)
+    plan = intent.build_screen_plan(
+        intent.classify_intent("Show active alarms"),
+        context,
+    )
+
+    assert plan.bindings_for("alarm_banner") == (
+        "ALM_CT01",
+        "ALM_HP01",
+        "ALM_LR01",
+    )
+
+
+def test_comms_plan_uses_context_devices():
+    context = context_store.get_context(CHILLER)
+    plan = intent.build_screen_plan(
+        intent.classify_intent("Show communication health"),
+        context,
+    )
+
+    assert plan.bindings_for("comms_health") == ("BMS_Gateway", "Compressor_VFD")
+
+
+def test_plan_never_selects_write_tags():
+    for asset_id in (CONVEYOR, CHILLER):
+        context = context_store.get_context(asset_id)
+        plan = intent.build_screen_plan(
+            intent.classify_intent("Show me the machine"),
+            context,
+        )
+        selected = set(sum((list(values) for _, values in plan.required_bindings), []))
+        assert not selected.intersection(
+            tag["name"] for tag in context["tags"] if tag["access"] == "write"
+        )
+
+
+def test_ambiguous_focus_keeps_all_matches_deterministically():
+    context = {
+        "tags": [
+            {"name": "Temperature_A", "access": "read"},
+            {"name": "Temperature_B", "access": "read"},
+            {"name": "Start_Command", "access": "write"},
+        ],
+        "alarms": [],
+        "comms": [],
+    }
+    plan = intent.build_screen_plan(
+        intent.classify_intent("Show me the temperature trend"),
+        context,
+    )
+
+    assert plan.bindings_for("trend") == ("Temperature_A", "Temperature_B")
+
+
+def test_no_focus_uses_generic_monitor_fallback():
+    plan = intent.build_screen_plan(
+        intent.classify_intent("Show me the machine"),
+        context_store.get_context(CONVEYOR),
+    )
+
+    assert plan.generic_monitor is True
+    assert plan.required_component_types == ()
+
+
+def test_context_changes_are_reflected_in_planning():
+    context = dict(context_store.get_context(CHILLER))
+    context["tags"] = [
+        *context["tags"],
+        {"name": "Vibration_PV", "type": "analog", "unit": "mm/s", "access": "read"},
+    ]
+    plan = intent.build_screen_plan(
+        intent.classify_intent("Show me the vibration trend"),
+        context,
+    )
+
+    assert plan.bindings_for("trend") == ("Vibration_PV",)
