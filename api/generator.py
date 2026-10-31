@@ -38,6 +38,8 @@ import context_store
 import intent
 import validator
 
+from intent import classify_intent
+
 MODEL_NAME = "gpt-4o-mini"
 
 # Groq and xAI both serve an OpenAI-compatible API, so the same client and the
@@ -444,12 +446,18 @@ def generate_and_validate(prompt: str, asset_id: str, panel_class: str, llm_fn=_
     if intent.control_request(prompt):
         return None, read_only_error(asset_id, prompt)
 
+    operator_intent = intent.classify_intent(prompt)
+
     ctx = _context_for_prompt(asset_id)
     system_prompt = _build_system_prompt()
     # The operator's words go in verbatim. What changed on the machine is
     # added as separate context, never spliced into their request.
     base_user_prompt = (
         f"Operator request: \"{prompt}\"\n"
+        f"Structured operator intent:\n"
+        f"- intent: {operator_intent.intent}\n"
+        f"- focus: {', '.join(operator_intent.focus) or 'none'}\n"
+        f"- urgency: {operator_intent.urgency}\n"
         f"Target panel class: {panel_class}\n"
         f"Machine context:\n{json.dumps(ctx, indent=2)}"
         f"{_whats_new_note(asset_id, since_context_version, previous_spec)}"
